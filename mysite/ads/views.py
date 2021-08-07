@@ -1,4 +1,4 @@
-from ads.models import Ad, Comment
+from ads.models import Ad, Comment, Fav
 from ads.owner import OwnerListView, OwnerDetailView, OwnerCreateView, OwnerUpdateView, OwnerDeleteView
 from ads.forms import CreateForm, CommentForm
 
@@ -7,12 +7,40 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.views import View
 from django.http import HttpResponse
+from django.utils.decorators import method_decorator
+from django.db.utils import IntegrityError
+from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Q
+from django.contrib.humanize.templatetags.humanize import naturaltime
+
 
 
 class AdListView(OwnerListView):
-    model = Ad
-    # By convention:
-    # template_name = "ads/ad_list.html"
+    template_name = "ads/ad_list.html"
+
+    def get(self, request) :
+        strval =  request.GET.get("search", False)
+
+        if strval:
+            query = Q(title__icontains=strval) 
+            query.add(Q(text__icontains=strval), Q.OR)
+            query.add(Q(tags__name__in=[strval]), Q.OR)
+            ad_list = Ad.objects.filter(query).select_related().distinct().order_by('-updated_at')[:10]
+        else:
+            ad_list = Ad.objects.all().order_by('-updated_at')[:10]
+
+        favorites = list()
+        if request.user.is_authenticated:
+            # rows = [{'id': 2}, {'id': 4} ... ]  (A list of rows)
+            rows = request.user.favorite_ads.values('id')
+            # favorites = [2, 4, ...] using list comprehension
+            favorites = [ row['id'] for row in rows ]
+
+        for obj in ad_list:
+            obj.natural_updated = naturaltime(obj.updated_at)
+
+        ctx = {'ad_list' : ad_list, 'favorites': favorites, 'search': strval}
+        return render(request, self.template_name, ctx)
 
 
 class AdDetailView(OwnerDetailView):
@@ -46,6 +74,8 @@ class AdCreateView(LoginRequiredMixin, View):
         ad = form.save(commit=False)
         ad.owner = self.request.user
         ad.save()
+        form.save_m2m()    # Add this
+
         return redirect(self.success_url)
 
 
@@ -68,7 +98,9 @@ class AdUpdateView(LoginRequiredMixin, View):
             return render(request, self.template_name, ctx)
 
         ad = form.save(commit=False)
+        ad.owner = self.request.user
         ad.save()
+        form.save_m2m()    # Add this
 
         return redirect(self.success_url)
 
@@ -102,3 +134,28 @@ class CommentDeleteView(OwnerDeleteView):
     def get_success_url(self):
         ad = self.object.ad
         return reverse('ads:ad_detail', args=[ad.id])
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class AddFavoriteView(LoginRequiredMixin, View):
+    def post(self, request, pk) :
+        print("Add PK",pk)
+        t = get_object_or_404(Ad, id=pk)
+        fav = Fav(user=request.user, ad=t)
+        try:
+            fav.save()  # In case of duplicate key
+        except IntegrityError as e:
+            pass
+        return HttpResponse()
+
+@method_decorator(csrf_exempt, name='dispatch')
+class DeleteFavoriteView(LoginRequiredMixin, View):
+    def post(self, request, pk) :
+        print("Delete PK",pk)
+        t = get_object_or_404(Ad, id=pk)
+        try:
+            fav = Fav.objects.get(user=request.user, ad=t).delete()
+        except Fav.DoesNotExist as e:
+            pass
+
+        return HttpResponse()
